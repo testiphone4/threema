@@ -1,0 +1,180 @@
+<project name="build-all" default="archive" basedir=".">
+
+  <taskdef resource="net/sf/antcontrib/antcontrib.properties">
+      <classpath>
+          <pathelement location="/usr/share/ant/lib/ant-contrib-1.0b3.jar"/>
+      </classpath>
+  </taskdef>
+
+  <property name="workdir" value="."/>
+  <property name="srcdir" value="${workdir}"/>
+  <property name="cidir" value="${srcdir}/ci"/>
+
+  <property name="releasedir" value="${workdir}/release"/>
+  <property name="archivedir" value="/samb-server/sandstone-release"/>
+  <property name="DEBUG" value="true"/>
+
+  <exec dir="${srcdir}" executable="sh" failonerror="true" outputproperty="gitversion">
+      <arg line="-c &quot;git describe 2&gt;/dev/null | awk -F- &apos;{print $1}&apos;&quot;" />
+  </exec>
+  <exec dir="${srcdir}" executable="sh" failonerror="true" outputproperty="full_gitversion">
+      <arg line="-c &quot;git describe 2&gt;/dev/null &quot;" />
+  </exec>
+
+  <property name="platform_installer_name" value="bcebs-${gitversion}-installer.tar.gz" />
+  <property name="BRANCH_NAME"  value="master"/>
+
+  <loadproperties srcFile="${cidir}/ci.conf"/>
+
+  <target name="clean">
+    <delete dir="${releasedir}"/>
+    <delete includeemptydirs="true" failonerror="false">
+        <fileset dir="${releasedir}" includes="**/*"/>
+    </delete>
+    <exec executable="/bin/rm">
+        <arg line="-rf ${releasedir}"/>
+    </exec>
+    <mkdir dir="${releasedir}/bcebs_installer"/>
+    <copy todir="${releasedir}/bcebs_installer" >
+      <fileset dir="${srcdir}/bcebs_installer"/>
+   </copy>
+  </target>
+
+
+  <target name="build-sandstone"  depends="clean">
+    <!--echo message="ant -f ${cidir}/engine/build.xml -Dworkdir=${workdir}/ -Dsrcdir=${srcdir}/engine -Doutput_dir=${releasedir}/sandstone-installer/pkgs/sds/ -DBUILD_NUMBER=${BUILD_NUMBER} -DDEBUG=${DEBUG}"/-->
+    <ant antfile="${cidir}/engine/build.xml" inheritAll="false">
+        <property name="workdir" value="${workdir}/"/>
+        <property name="srcdir" value="${srcdir}/engine"/>
+        <property name="cidir" value="${cidir}/engine"/>
+        <property name="output_dir" value="${releasedir}/bcebs_installer/pkgs/sds/"/>
+        <property name="BUILD_NUMBER" value="${BUILD_NUMBER}"/>
+        <property name="DEBUG" value="${DEBUG}"/>
+        <property name="BRANCH_NAME" value="${BRANCH_NAME}" />
+        <property name="gitversion" value="${gitversion}" />
+    </ant>
+
+    <ant	antfile="${cidir}/om/build.xml" inheritAll="false">
+        <property name="workdir" value="${srcdir}/om"/>
+        <property name="srcdir" value="${srcdir}/om"/>
+        <property name="cidir" value="${cidir}/om"/>
+        <property name="output_dir" value="${releasedir}/bcebs_installer/pkgs/om/"/>
+        <property name="BUILD_NUMBER" value="${BUILD_NUMBER}"/>
+        <property name="DEBUG" value="${DEBUG}"/>
+        <property name="gitversion" value="${gitversion}" />
+    </ant>
+
+    <copy todir="${releasedir}/bcebs_installer/util" overwrite="true" force="true">
+        <fileset dir="${srcdir}/om/sdsom/bin">
+            <include name="common.sh"/>
+        </fileset>
+    </copy>
+
+		<!-- rpmbuild rbdclient package -->
+	<echo message="parpare to rpmbuild rbdclient"/>
+	<delete dir="${workdir}/rpmbuild"/>
+	<mkdir dir="${workdir}/rpmbuild"/>
+	<mkdir dir="${workdir}/rpmbuild/BUILD"/>
+	<mkdir dir="${workdir}/rpmbuild/RPMS"/>
+	<mkdir dir="${workdir}/rpmbuild/SOURCES"/>
+	<mkdir dir="${workdir}/rpmbuild/SPECS"/>
+	<mkdir dir="${workdir}/rpmbuild/SRPMS"/>
+	<mkdir dir="${workdir}/rpmbuild/BUILD/rbdclient"/>
+	<copy file="${srcdir}/engine/rbdclient.spec" todir="${workdir}/rpmbuild/SPECS"/>
+	<exec dir="${workdir}" executable="sed" failonerror="true">
+      <arg line="-i 's/^Version:.*$/Version:${gitversion}/' ${workdir}/rpmbuild/SPECS/rbdclient.spec"/>
+    </exec>
+	<exec dir="${workdir}" executable="sh" failonerror="true">
+      <arg line="${cidir}/engine/cp_with_link.sh ${srcdir}/engine/release/lib/librbd*so* ${workdir}/rpmbuild/BUILD/rbdclient/"/>
+    </exec>
+	<exec dir="${workdir}" executable="sh" failonerror="true">
+      <arg line="${cidir}/engine/cp_with_link.sh ${srcdir}/engine/release/lib/librados*so* ${workdir}/rpmbuild/BUILD/rbdclient/"/>
+    </exec>
+	<exec dir="${workdir}" executable="sh" failonerror="true">
+      <arg line="${cidir}/engine/cp_with_link.sh ${srcdir}/engine/release/lib/libunwind*so* ${workdir}/rpmbuild/BUILD/rbdclient/"/>
+    </exec>
+
+	<echo message="rpmbuild rbdclient"/>
+	<exec dir="${workdir}/rpmbuild/SPECS" executable="rpmbuild" failonerror="true">
+	  <arg line="--define '_topdir ${workdir}/rpmbuild' -bb rbdclient.spec"/>
+	  <env key="QA_RPATHS" value="$[ 0x0001|0x0002 ]"/>
+	</exec>
+	
+	<copy todir="${releasedir}/sandstone_installer">
+	  <fileset dir="${workdir}/rpmbuild/RPMS/x86_64/" includes="*.rpm" />
+	</copy>
+    <touch file="${releasedir}/bcebs_installer/version" />
+    <echo message="${full_gitversion}" file="${releasedir}/bcebs_installer/version" append="true"/>
+
+    <tar destfile="${workdir}/${platform_installer_name}" basedir="${releasedir}/" includes="bcebs_installer/**" excludes=".git" compression="gzip" />
+  </target>
+
+  <!-- output normal sandstone installer package -->
+  <target name="archive" depends="build-sandstone">
+      <condition property="DEBUG_RELEASE" value="debug" else="release">
+          <equals arg1="${DEBUG}" arg2="true" />
+      </condition>
+
+      <propertyfile file="${workdir}/CURRENT_VERSION_${DEBUG_RELEASE}">
+          <entry key="SANDSTONE_CURRENT_VER" value="${BUILD_NUMBER}" />
+      </propertyfile>
+
+      <sshexec host="${master.host}"
+               username="root" password="sandstone"
+               command="mkdir -p ${archivedir}/${BRANCH_NAME}/"
+               trust="yes" failonerror="false"/>
+      <scp file="${workdir}/${platform_installer_name}" todir="root:sandstone@${master.host}:${archivedir}/${BRANCH_NAME}/${platform_installer_name}.${DEBUG_RELEASE}.${BUILD_NUMBER}" trust="true"/>
+      <scp file="${workdir}/CURRENT_VERSION_${DEBUG_RELEASE}" todir="root:sandstone@${master.host}:${archivedir}/${BRANCH_NAME}/CURRENT_VERSION_${DEBUG_RELEASE}" trust="true"/>
+  </target>
+
+
+  <!-- copy and compress update files -->
+  <property name="platform_upgrader_name" value="sandstone-${full_gitversion}-upgrader.tar.gz" />
+  <target name="build_upgrader_package" depends="archive">
+      <mkdir dir="${releasedir}/bcebs_upgrader"/>
+      <copy todir="${releasedir}/bcebs_upgrader/" >
+          <!-- copy upgrade dirs: upgrade_engine_files upgrade_om_files common.sh  update.CONFIG -->
+          <fileset dir="${srcdir}/om/sdsom/upgrade/" includes="upgrade_engine_files/ upgrade_om_files/ common.sh update.CONFIG" />
+      </copy>
+
+      <mkdir dir="${releasedir}/bcebs_upgrader/new_files/"/>
+      <mkdir dir="${releasedir}/bcebs_upgrader/new_files/om"/>
+      <copy todir="${releasedir}/bcebs_upgrader/new_files/om" >
+          <!-- copy om dirs -->
+          <fileset dir="${srcdir}/om/release" includes="tools/  webapp/" excludes="webapp/content/bcebs/bower_components/"/>
+      </copy>
+
+      <copy todir="${releasedir}/bcebs_upgrader/new_files/om" >
+            <fileset dir="${srcdir}/om/release/venv/lib/python2.6/site-packages/sdsom-core-py2.6.egg" includes="sdsom/" />
+      </copy>
+
+      <mkdir dir="${releasedir}/bcebs_upgrader/new_files/engine"/>
+      <copy todir="${releasedir}/bcebs_upgrader/new_files/engine" >
+          <!-- copy engine dirs: bin  sbin lib -->
+          <fileset dir="${srcdir}/engine/release" includes="bin/  sbin/ lib/"/>
+      </copy>
+
+      <touch file="${releasedir}/bcebs_upgrader/state.CONFIG" />
+      <touch file="${releasedir}/bcebs_upgrader/version" />
+      <echo message="${full_gitversion}" file="${releasedir}/bcebs_upgrader/version" append="true"/>
+
+      <tar destfile="${workdir}/${platform_upgrader_name}" basedir="${releasedir}/" includes="bcebs_upgrader/**" excludes=".git" compression="gzip" />
+  </target>
+
+  <target name="archive_upgrader_package" depends="build_upgrader_package">
+      <condition property="DEBUG_RELEASE" value="debug" else="release">
+          <equals arg1="${DEBUG}" arg2="true" />
+      </condition>
+
+      <propertyfile file="${workdir}/CURRENT_VERSION_${DEBUG_RELEASE}">
+          <entry key="SANDSTONE_CURRENT_VER" value="${BUILD_NUMBER}" />
+      </propertyfile>
+
+      <sshexec host="${master.host}"
+               username="root" password="sandstone"
+               command="mkdir -p ${archivedir}/${BRANCH_NAME}/"
+               trust="yes" failonerror="false"/>
+      <scp file="${workdir}/${platform_upgrader_name}" todir="root:sandstone@${master.host}:${archivedir}/${BRANCH_NAME}/${platform_upgrader_name}.${DEBUG_RELEASE}.${BUILD_NUMBER}" trust="true"/>
+  </target>
+
+</project>
